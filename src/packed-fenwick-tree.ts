@@ -113,6 +113,33 @@ export class PackedFenwickTree {
     return this.tree;
   }
   
+  // Get value at specific tick without affecting metrics
+  peekValue(tick: number): uint64 {
+    const { wordIndex, position } = this.getWordPosition(tick);
+    const packed = this.tree.get(wordIndex) || 0n;
+    const values = this.unpackWord(packed);
+    return values[position];
+  }
+
+  // Get all ticks that have a non-zero value
+  getActiveTicks(): {tick: number, value: uint64}[] {
+    const activeTicks: {tick: number, value: uint64}[] = [];
+    const treeData = this.getTree();
+    const sortedWords = Array.from(treeData.keys()).sort((a, b) => a - b);
+    
+    for (const wordIndex of sortedWords) {
+        const packedValue = treeData.get(wordIndex)!;
+        const values = this.unpackWord(packedValue);
+        for (let i = 0; i < 4; i++) {
+            if (values[i] > 0n) {
+                const tick = wordIndex * 4 + i;
+                activeTicks.push({tick, value: values[i]});
+            }
+        }
+    }
+    return activeTicks;
+  }
+
   // Reset dirty words tracking for a new transaction
   beginTx(): void {
     this.dirtyWords.clear();

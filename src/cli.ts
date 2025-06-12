@@ -3,6 +3,7 @@ import { GasProfiler } from './gas-profiler';
 import { Visualizer } from './visualizer';
 import { uint256 } from './types';
 import inquirer from 'inquirer';
+import chalk from 'chalk';
 
 const MAX_TICKS = 10000;
 
@@ -50,8 +51,12 @@ class AuctionSimulator {
     const gasResult = GasProfiler.calculateUpdateCost(opResult.operations);
     
     Visualizer.showUpdate(bid.tick, bid.amount, opResult, gasResult);
-    const highlightedWords = opResult.operations.map(op => op.wordIndex);
-    Visualizer.drawTree(this.tree, highlightedWords);
+    Visualizer.showUpdateInBinary(bid.tick, MAX_TICKS);
+    const highlightedWords = opResult.operations.map((op: { wordIndex: any; }) => op.wordIndex);
+    Visualizer.drawMemoryLayout(this.tree, highlightedWords);
+
+    const updatedTicks = opResult.operations.map((op: { tick: any; }) => op.tick);
+    Visualizer.drawAsciiTree(this.tree, updatedTicks);
   }
 
   public async clearAuction() {
@@ -63,15 +68,49 @@ class AuctionSimulator {
     });
     const targetVolume = BigInt(targetVolumeStr);
 
-    console.log('Finding clearing price...');
-    
-    // This is a simplified search. A real implementation would be more robust.
+    // --- Phase 1: Find Clearing Price (Read-only) ---
+    console.log(chalk.bold.blue('\n--- Finding Clearing Price (Search Phase) ---'));
     const { clearingPrice, queryOps } = this.findClearingPrice(targetVolume);
+    const searchGasResult = GasProfiler.calculateQueryCost(queryOps);
+    Visualizer.showClear(targetVolume, clearingPrice, queryOps, searchGasResult);
+
+    if (clearingPrice === -1) {
+        console.log(chalk.red('Not enough volume in the book to clear this amount.'));
+        return;
+    }
+
+    // --- Phase 2: Update Tree (Write Phase) ---
+    console.log(chalk.bold.yellow('\n--- Clearing Filled Ticks from Tree (Write Phase) ---'));
+    this.tree.beginTx(); // Reset dirty word tracking for this new "transaction"
     
-    const gasResult = GasProfiler.calculateQueryCost(queryOps);
-    Visualizer.showClear(targetVolume, clearingPrice, queryOps, gasResult);
-    const highlightedWords = queryOps.map(op => op.wordIndex);
-    Visualizer.drawTree(this.tree, highlightedWords);
+    let remainingVolumeToClear = targetVolume;
+    const allUpdateOps: any[] = [];
+
+    // Iterate from the highest possible tick downwards
+    for (let tick = MAX_TICKS - 1; tick >= clearingPrice; tick--) {
+      if (remainingVolumeToClear <= 0n) break;
+
+      // To get the actual volume at a single tick, we query the range
+      const volumeAtTick = this.tree.query(tick).sum - this.tree.query(tick - 1).sum;
+
+      if (volumeAtTick > 0n) {
+        const amountToClearFromTick = remainingVolumeToClear < volumeAtTick ? remainingVolumeToClear : volumeAtTick;
+        
+        const delta = -amountToClearFromTick;
+        const updateResult = this.tree.update(tick, delta);
+        allUpdateOps.push(...updateResult.operations);
+
+        console.log(`   - Clearing Tick ${tick}, removing ${amountToClearFromTick} volume.`);
+        remainingVolumeToClear -= amountToClearFromTick;
+      }
+    }
+
+    const updateGasResult = GasProfiler.calculateUpdateCost(allUpdateOps);
+    console.log(`   Gas cost for writing updates: ${chalk.red(updateGasResult.totalGas)}`);
+
+    console.log(chalk.bold.green('\n--- Tree State After Clearing ---'));
+    Visualizer.drawMemoryLayout(this.tree, []);
+    Visualizer.drawAsciiTree(this.tree, []);
   }
 
   // Binary search to find the clearing price
@@ -79,10 +118,11 @@ class AuctionSimulator {
     let low = 0;
     let high = MAX_TICKS;
     let clearingPrice = 0;
-    let finalOps: any[] = [];
+    const allOps: any[] = [];
 
-    let totalVolumeResult = this.tree.query(MAX_TICKS -1);
+    const totalVolumeResult = this.tree.query(MAX_TICKS - 1);
     const totalVolume = totalVolumeResult.sum;
+    allOps.push(...totalVolumeResult.operations);
 
     if (totalVolume < targetVolume) {
         return { clearingPrice: -1, queryOps: [] }; // Not enough volume
@@ -91,27 +131,32 @@ class AuctionSimulator {
     // O(log N) search
     while (low <= high) {
         const mid = Math.floor((low + high) / 2);
-        const { sum: volumeAtMid, operations } = this.tree.query(mid);
         
-        // We want volumeFromTop, which is totalVolume - volumeBelow
-        // fenwickQuery gives sum up to and including mid, so that's volumeBelow
-        const volumeFromTop = totalVolume - this.tree.query(mid-1).sum;
+        if (mid === 0) {
+            low = mid + 1;
+            continue;
+        }
+
+        const volumeBelowResult = this.tree.query(mid - 1);
+        allOps.push(...volumeBelowResult.operations);
+        
+        const volumeFromTop = totalVolume - volumeBelowResult.sum;
 
         if (volumeFromTop >= targetVolume) {
             // This price or a higher one might be the clearing price
             clearingPrice = mid;
-            finalOps = operations;
             low = mid + 1;
         } else {
             high = mid - 1;
         }
     }
-    return { clearingPrice, queryOps: finalOps };
+    return { clearingPrice, queryOps: allOps };
   }
 
   public run = async () => {
     console.log('--- Packed Fenwick Tree Auction Simulator ---');
-    Visualizer.drawTree(this.tree);
+    Visualizer.drawMemoryLayout(this.tree);
+    Visualizer.drawAsciiTree(this.tree);
 
     while (true) {
       const choices = [];
