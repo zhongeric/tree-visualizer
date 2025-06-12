@@ -9,42 +9,38 @@ const MAX_TICKS = 10000;
 
 class AuctionSimulator {
   private tree: PackedFenwickTree;
-  private bids: { tick: number, amount: uint256 }[] = [];
-  private bidCursor = 0;
+  private lastClearingPrice: number = 0;
 
   constructor() {
     this.tree = new PackedFenwickTree(MAX_TICKS);
-    this.generateBids();
   }
 
-  private generateBids() {
-    // Generate a mix of dense and sparse bids
-    for (let i = 0; i < 20; i++) {
-      // Cluster some bids
-      const tick = 100 + Math.floor(Math.random() * 20);
-      const amount = BigInt(Math.floor(Math.random() * 50) + 1);
-      this.bids.push({ tick, amount });
+  private _generateNextBid(): { tick: number, amount: uint256 } {
+    // Most bids will be clustered near the last clearing price
+    let basePrice = this.lastClearingPrice === 0 ? 100 : this.lastClearingPrice;
+    let tick: number;
+    
+    // Add some variance
+    const isAggressive = Math.random() < 0.15; // 15% chance of a high bid
+    if (isAggressive) {
+        // Aggressive bid, placed somewhere significantly higher
+        const offset = Math.floor(Math.random() * 1000) + 50;
+        tick = basePrice + offset;
+    } else {
+        // Standard bid, close to the last clearing price
+        const offset = Math.floor(Math.random() * 50);
+        tick = basePrice + offset;
     }
-    for (let i = 0; i < 10; i++) {
-        // Some sparse bids
-        const tick = Math.floor(Math.random() * (MAX_TICKS - 1000)) + 1000;
-        const amount = BigInt(Math.floor(Math.random() * 50) + 1);
-        this.bids.push({ tick, amount });
-    }
-    this.bids.sort((a, b) => a.tick - b.tick);
-  }
 
-  public hasNextBid(): boolean {
-    return this.bidCursor < this.bids.length;
+    // Ensure tick is within bounds
+    tick = Math.min(tick, MAX_TICKS - 1);
+
+    const amount = BigInt(Math.floor(Math.random() * 50) + 1);
+    return { tick, amount };
   }
 
   public placeNextBid() {
-    if (!this.hasNextBid()) {
-      console.log('No more bids to place.');
-      return;
-    }
-    const bid = this.bids[this.bidCursor];
-    this.bidCursor++;
+    const bid = this._generateNextBid();
 
     this.tree.beginTx(); // Reset dirty word tracking for this "transaction"
     const opResult = this.tree.update(bid.tick, bid.amount);
@@ -78,6 +74,7 @@ class AuctionSimulator {
         console.log(chalk.red('Not enough volume in the book to clear this amount.'));
         return;
     }
+    this.lastClearingPrice = clearingPrice;
 
     // --- Phase 2: Update Tree (Write Phase) ---
     console.log(chalk.bold.yellow('\n--- Clearing Filled Ticks from Tree (Write Phase) ---'));
@@ -159,12 +156,11 @@ class AuctionSimulator {
     Visualizer.drawAsciiTree(this.tree);
 
     while (true) {
-      const choices = [];
-      if (this.hasNextBid()) {
-        choices.push({ name: `Place next bid (Tick: ${this.bids[this.bidCursor].tick}, Amount: ${this.bids[this.bidCursor].amount})`, value: 'bid' });
-      }
-      choices.push({ name: 'Clear auction', value: 'clear' });
-      choices.push({ name: 'Exit', value: 'exit' });
+      const choices = [
+        { name: `Place a new random bid`, value: 'bid' },
+        { name: 'Clear auction', value: 'clear' },
+        { name: 'Exit', value: 'exit' }
+      ];
 
       const { action } = await inquirer.prompt(
         {
