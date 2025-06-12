@@ -1,146 +1,20 @@
+// This file is for static analysis and visualization examples.
+// To run the interactive simulator, use `npm run cli`.
+
+import { PackedFenwickTree } from "./packed-fenwick-tree.js";
+import { uint64 } from "./types.js";
+
 // Packed Fenwick Tree - 4x64-bit values per 256-bit word
-type uint256 = bigint;
-type uint64 = bigint;
 
 // Constants for bit manipulation
 const UINT64_MAX = (1n << 64n) - 1n;
 const UINT64_BITS = 64n;
 
-class PackedFenwickTree {
-  private tree: Map<number, uint256> = new Map(); // word index -> packed 256-bit value
-  private readonly maxTicks: number;
-  private accessedWords: Set<number> = new Set();
-  
-  // Metrics
-  public storageReads: number = 0;
-  public storageWrites: number = 0;
-  public bitOperations: number = 0;
-  
-  constructor(maxTicks: number = 10000) {
-    this.maxTicks = maxTicks;
-  }
-  
-  // Calculate which word and position within word for a tick
-  private getWordPosition(tick: number): { wordIndex: number, position: number } {
-    // Each word contains 4 ticks, so:
-    // Ticks 0-3 → word 0, positions 0-3
-    // Ticks 4-7 → word 1, positions 0-3
-    const wordIndex = Math.floor(tick / 4);
-    const position = tick % 4;
-    return { wordIndex, position };
-  }
-  
-  // Pack 4 uint64 values into a uint256
-  private packWord(values: uint64[]): uint256 {
-    let packed = 0n;
-    for (let i = 0; i < 4; i++) {
-      const value = values[i] || 0n;
-      packed |= (value & UINT64_MAX) << (BigInt(i) * UINT64_BITS);
-    }
-    this.bitOperations += 4;
-    return packed;
-  }
-  
-  // Unpack a uint256 into 4 uint64 values
-  private unpackWord(packed: uint256): uint64[] {
-    const values: uint64[] = [];
-    for (let i = 0; i < 4; i++) {
-      values[i] = (packed >> (BigInt(i) * UINT64_BITS)) & UINT64_MAX;
-    }
-    this.bitOperations += 4;
-    return values;
-  }
-  
-  // Get value at specific tick
-  private getValue(tick: number): uint64 {
-    const { wordIndex, position } = this.getWordPosition(tick);
-    const packed = this.tree.get(wordIndex) || 0n;
-    
-    // Track storage access
-    if (!this.accessedWords.has(wordIndex)) {
-      this.storageReads++; // Cold read
-      this.accessedWords.add(wordIndex);
-    } else {
-      this.storageReads++; // Warm read
-    }
-    
-    const values = this.unpackWord(packed);
-    return values[position];
-  }
-  
-  // Set value at specific tick
-  private setValue(tick: number, value: uint64): void {
-    const { wordIndex, position } = this.getWordPosition(tick);
-    const packed = this.tree.get(wordIndex) || 0n;
-    
-    const values = this.unpackWord(packed);
-    values[position] = value;
-    
-    const newPacked = this.packWord(values);
-    this.tree.set(wordIndex, newPacked);
-    
-    this.storageWrites++;
-  }
-  
-  // Update Fenwick tree for a tick with delta
-  update(tick: number, delta: uint64): { depth: number, wordsAccessed: number[] } {
-    let idx = tick + 1; // Fenwick is 1-indexed
-    let depth = 0;
-    const wordsAccessed: number[] = [];
-    
-    while (idx <= this.maxTicks) {
-      depth++;
-      
-      const currentValue = this.getValue(idx - 1); // Convert back to 0-indexed
-      this.setValue(idx - 1, currentValue + delta);
-      
-      const { wordIndex } = this.getWordPosition(idx - 1);
-      if (!wordsAccessed.includes(wordIndex)) {
-        wordsAccessed.push(wordIndex);
-      }
-      
-      // Move to parent
-      idx += idx & -idx;
-    }
-    
-    return { depth, wordsAccessed };
-  }
-  
-  // Query cumulative sum up to tick (inclusive)
-  query(tick: number): uint64 {
-    let sum = 0n;
-    let idx = tick + 1; // Fenwick is 1-indexed
-    
-    while (idx > 0) {
-      sum += this.getValue(idx - 1); // Convert back to 0-indexed
-      idx -= idx & -idx;
-    }
-    
-    return sum;
-  }
-  
-  // Reset metrics
-  resetMetrics(): void {
-    this.storageReads = 0;
-    this.storageWrites = 0;
-    this.bitOperations = 0;
-  }
-  
-  // Get tree statistics
-  getStats() {
-    return {
-      wordsUsed: this.tree.size,
-      totalCapacity: Math.ceil(this.maxTicks / 4),
-      storageUtilization: (this.tree.size / Math.ceil(this.maxTicks / 4) * 100).toFixed(1) + '%'
-    };
-  }
-}
-
 // Visualization of packed Fenwick tree structure
 class PackedFenwickVisualizer {
-  static visualizeUpdate(tick: number, maxTicks: number = 32): void {
+  static visualizeUpdatePath(tick: number, maxTicks: number = 32): void {
     console.log("\nPACKED FENWICK UPDATE VISUALIZATION");
-    console.log("=" .repeat(60));
+    console.log("=".repeat(60));
     console.log(`Updating tick ${tick} (Fenwick index ${tick + 1})`);
     
     // Show word packing
@@ -176,7 +50,7 @@ class PackedFenwickVisualizer {
   
   static compareWithStandard(): void {
     console.log("\n\nCOMPARISON: STANDARD vs PACKED FENWICK");
-    console.log("=" .repeat(60));
+    console.log("=".repeat(60));
     
     // Storage comparison
     console.log("\nStorage Usage (10,000 ticks):");
@@ -216,122 +90,24 @@ class PackedFenwickVisualizer {
   }
 }
 
-// Simulation of tree growth with packed structure
-class PackedAuctionSimulator {
-  private tree: PackedFenwickTree;
-  private currentFloor: uint256 = 100n;
-  
-  constructor() {
-    this.tree = new PackedFenwickTree(10000);
-  }
-  
-  simulatePeriod(numBids: number, bidDistribution: 'narrow' | 'wide' | 'mixed'): any {
-    this.tree.resetMetrics();
-    
-    const bids: { tick: number, amount: uint64 }[] = [];
-    let maxTick = 0;
-    let totalWordsAccessed = new Set<number>();
-    
-    // Generate bids based on distribution
-    for (let i = 0; i < numBids; i++) {
-      let tickOffset: number;
-      
-      switch (bidDistribution) {
-        case 'narrow':
-          // Most bids within $5 of floor
-          tickOffset = Math.floor(Math.random() * 500);
-          break;
-        case 'wide':
-          // Bids spread across $50 range
-          tickOffset = Math.floor(Math.random() * 5000);
-          break;
-        case 'mixed':
-          // 70% narrow, 30% wide
-          if (Math.random() < 0.7) {
-            tickOffset = Math.floor(Math.random() * 200);
-          } else {
-            tickOffset = 200 + Math.floor(Math.random() * 4800);
-          }
-          break;
-      }
-      
-      maxTick = Math.max(maxTick, tickOffset);
-      const amount = 10n + BigInt(Math.floor(Math.random() * 90));
-      
-      bids.push({ tick: tickOffset, amount });
-      
-      // Update tree and track words
-      const { wordsAccessed } = this.tree.update(tickOffset, amount);
-      wordsAccessed.forEach(w => totalWordsAccessed.add(w));
-    }
-    
-    const stats = this.tree.getStats();
-    const treeHeight = Math.ceil(Math.log2(maxTick + 1));
-    
-    return {
-      numBids,
-      distribution: bidDistribution,
-      maxTick,
-      treeHeight,
-      uniqueWordsAccessed: totalWordsAccessed.size,
-      totalWords: stats.wordsUsed,
-      storageReads: this.tree.storageReads,
-      storageWrites: this.tree.storageWrites,
-      bitOperations: this.tree.bitOperations,
-      avgWordsPerBid: (this.tree.storageWrites / numBids).toFixed(2)
-    };
-  }
-  
-  runFullSimulation(): void {
-    console.log("\n\nPACKED FENWICK TREE GROWTH SIMULATION");
-    console.log("=" .repeat(60));
-    
-    const scenarios = [
-      { bids: 50, dist: 'narrow' as const },
-      { bids: 100, dist: 'narrow' as const },
-      { bids: 100, dist: 'wide' as const },
-      { bids: 200, dist: 'mixed' as const },
-      { bids: 500, dist: 'mixed' as const }
-    ];
-    
-    scenarios.forEach((scenario, i) => {
-      const result = this.simulatePeriod(scenario.bids, scenario.dist);
-      
-      console.log(`\nScenario ${i + 1}: ${result.numBids} bids (${result.distribution})`);
-      console.log(`  Max tick: ${result.maxTick} (tree height: ${result.treeHeight})`);
-      console.log(`  Words used: ${result.totalWords} of ${Math.ceil(10000/4)} possible`);
-      console.log(`  Unique words accessed: ${result.uniqueWordsAccessed}`);
-      console.log(`  Storage operations: ${result.storageReads} reads, ${result.storageWrites} writes`);
-      console.log(`  Avg words per bid: ${result.avgWordsPerBid}`);
-      
-      // Calculate efficiency
-      const standardOps = result.numBids * result.treeHeight * 2; // reads + writes
-      const packedOps = result.storageReads + result.storageWrites;
-      const efficiency = ((standardOps - packedOps) / standardOps * 100).toFixed(1);
-      
-      console.log(`  Efficiency vs standard: ${efficiency}% fewer storage ops`);
-    });
-  }
-}
-
 // Example usage
 console.log("PACKED FENWICK TREE IMPLEMENTATION");
 console.log("4 × 64-bit values per 256-bit storage slot");
-console.log("=" .repeat(60));
+console.log("=".repeat(60));
 
 // Show update visualization
-PackedFenwickVisualizer.visualizeUpdate(13);
+PackedFenwickVisualizer.visualizeUpdatePath(13);
 
 // Show comparison
 PackedFenwickVisualizer.compareWithStandard();
 
-// Run growth simulation
-const simulator = new PackedAuctionSimulator();
-simulator.runFullSimulation();
+// Run growth simulation - This part is now handled by the CLI.
+// const simulator = new PackedAuctionSimulator();
+// simulator.runFullSimulation();
 
 // Show memory layout
 console.log("\n\nMEMORY LAYOUT EXAMPLE");
-console.log("=" .repeat(60));
+console.log("=".repeat(60));
 console.log("Word 0 contains ticks 0-3:");
 console.log("  Slot: 0x[tick3_64bits][tick2_64bits][tick1_64bits][tick0_64bits]");
 console.log("  Example: 0x0000000000000064000000000000003200000000000000190000000000000000");

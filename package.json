@@ -8,9 +8,10 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "ts-node src/index.ts",
+    "start": "node src/index.ts",
     "build": "tsc",
-    "dev": "ts-node"
+    "dev": "ts-node src/index.ts",
+    "cli": "ts-node src/cli.ts"
   },
   "keywords": [],
   "author": "",
@@ -19,5 +20,10 @@
     "@types/node": "^24.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@types/inquirer": "^9.0.8",
+    "chalk": "^5.4.1",
+    "inquirer": "^12.6.3"
   }
 }
