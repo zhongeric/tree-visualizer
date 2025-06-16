@@ -85,6 +85,34 @@ export class Visualizer {
     console.log('----------------------------\n');
   }
 
+  static drawFrontierState(data: any) {
+    console.log(chalk.bold.yellow('\n--- Frontier Auction State ---'));
+    console.log(`  Clearing Price (P*): ${chalk.green(data.Pstar)}`);
+    console.log(`  Volume >= P* (V*):   ${chalk.green(data.Vstar)}`);
+    console.log(`  Sale Supply:         ${chalk.gray(data.SaleSupply)}`);
+    
+    const activeBlocks = Array.from(data.blockBits.keys()).sort((a: any, b: any) => a - b);
+    if (activeBlocks.length > 0) {
+        console.log(chalk.bold.cyan('\n  Occupancy Bitmaps:'));
+        for(const block of activeBlocks) {
+            const mask = data.blockBits.get(block);
+            console.log(`    Block ${block}: ${chalk.magenta('0x' + mask.toString(16))}`);
+        }
+    }
+    console.log('----------------------------\n');
+  }
+
+  static showFrontierUpdate(summary: any) {
+    console.log(chalk.bold.magenta(`\n=> Bid of ${summary.amount} at Tick ${summary.tick}`));
+    console.log(chalk.gray('-----------------------------------------'));
+    if (summary.clearEvents.length > 0) {
+        console.log(chalk.bold.yellow('   Over-subscription triggered clearing!'));
+        for(const event of summary.clearEvents) {
+            console.log(`     - Frontier moved from ${chalk.red(event.from)} to ${chalk.green(event.to)}`);
+        }
+    }
+  }
+
   static showUpdate(tick: number, delta: uint256, opResult: any, gasResult: any) {
     console.log(chalk.bold.magenta(`\n=> Update Tick ${tick} with delta ${delta}`));
     console.log(chalk.gray('-----------------------------------------'));

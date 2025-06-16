@@ -1,4 +1,6 @@
-import { PackedFenwickTree } from './packed-fenwick-tree';
+import { FenwickAuction } from './models/fenwick-auction';
+import { FrontierAuction } from './models/frontier-auction';
+import { BaseAuction } from './models/base-auction';
 import { GasProfiler } from './gas-profiler';
 import { Visualizer } from './visualizer';
 import { uint256 } from './types';
@@ -8,11 +10,11 @@ import chalk from 'chalk';
 const MAX_TICKS = 10000;
 
 class AuctionSimulator {
-  private tree: PackedFenwickTree;
+  private model: BaseAuction;
   private lastClearingPrice: number = 0;
 
-  constructor() {
-    this.tree = new PackedFenwickTree(MAX_TICKS);
+  constructor(model: BaseAuction) {
+    this.model = model;
   }
 
   private _generateNextBid(): { tick: number, amount: uint256 } {
@@ -41,21 +43,30 @@ class AuctionSimulator {
 
   public placeNextBid() {
     const bid = this._generateNextBid();
+    const result = this.model.bid(bid.tick, bid.amount);
 
-    this.tree.beginTx(); // Reset dirty word tracking for this "transaction"
-    const opResult = this.tree.update(bid.tick, bid.amount);
-    const gasResult = GasProfiler.calculateUpdateCost(opResult.operations);
-    
-    Visualizer.showUpdate(bid.tick, bid.amount, opResult, gasResult);
-    Visualizer.showUpdateInBinary(bid.tick, MAX_TICKS);
-    const highlightedWords = opResult.operations.map((op: { wordIndex: any; }) => op.wordIndex);
-    Visualizer.drawMemoryLayout(this.tree, highlightedWords);
-
-    const updatedTicks = opResult.operations.map((op: { tick: any; }) => op.tick);
-    Visualizer.drawAsciiTree(this.tree, updatedTicks);
+    if (result.summary.type === 'fenwick') {
+        Visualizer.showUpdate(result.summary.tick, result.summary.amount, result.summary.opResult, result.gasResult);
+        Visualizer.showUpdateInBinary(result.summary.tick, MAX_TICKS);
+        const vizData = this.model.getVisualizationData();
+        const highlightedWords = result.summary.opResult.operations.map((op: { wordIndex: any; }) => op.wordIndex);
+        Visualizer.drawMemoryLayout(vizData.tree, highlightedWords);
+        const updatedTicks = result.summary.opResult.operations.map((op: { tick: any; }) => op.tick);
+        Visualizer.drawAsciiTree(vizData.tree, updatedTicks);
+    } else if (result.summary.type === 'frontier') {
+        Visualizer.showFrontierUpdate(result.summary);
+        console.log(`   Gas cost for bid & clear: ${chalk.red(result.gasResult.totalGas)}`);
+        const vizData = this.model.getVisualizationData();
+        Visualizer.drawFrontierState(vizData);
+    }
   }
 
-  public async clearAuction() {
+  public async clearFenwickAuction() {
+    if (!(this.model instanceof FenwickAuction)) {
+        console.log(chalk.red("Clear is only available for the Fenwick Tree model."));
+        return;
+    }
+
     const { targetVolumeStr } = await inquirer.prompt({
         type: 'input',
         name: 'targetVolumeStr',
@@ -66,7 +77,7 @@ class AuctionSimulator {
 
     // --- Phase 1: Find Clearing Price (Read-only) ---
     console.log(chalk.bold.blue('\n--- Finding Clearing Price (Search Phase) ---'));
-    const { clearingPrice, queryOps } = this.findClearingPrice(targetVolume);
+    const { clearingPrice, queryOps } = this.findFenwickClearingPrice(targetVolume);
     const searchGasResult = GasProfiler.calculateQueryCost(queryOps);
     Visualizer.showClear(targetVolume, clearingPrice, queryOps, searchGasResult);
 
@@ -78,7 +89,7 @@ class AuctionSimulator {
 
     // --- Phase 2: Update Tree (Write Phase) ---
     console.log(chalk.bold.yellow('\n--- Clearing Filled Ticks from Tree (Write Phase) ---'));
-    this.tree.beginTx(); // Reset dirty word tracking for this new "transaction"
+    this.model.beginTx(); // Reset dirty word tracking for this new "transaction"
     
     let remainingVolumeToClear = targetVolume;
     const allUpdateOps: any[] = [];
@@ -88,13 +99,13 @@ class AuctionSimulator {
       if (remainingVolumeToClear <= 0n) break;
 
       // To get the actual volume at a single tick, we query the range
-      const volumeAtTick = this.tree.query(tick).sum - this.tree.query(tick - 1).sum;
+      const volumeAtTick = this.model.query(tick).sum - this.model.query(tick - 1).sum;
 
       if (volumeAtTick > 0n) {
         const amountToClearFromTick = remainingVolumeToClear < volumeAtTick ? remainingVolumeToClear : volumeAtTick;
         
         const delta = -amountToClearFromTick;
-        const updateResult = this.tree.update(tick, delta);
+        const updateResult = this.model.update(tick, delta);
         allUpdateOps.push(...updateResult.operations);
 
         console.log(`   - Clearing Tick ${tick}, removing ${amountToClearFromTick} volume.`);
@@ -106,18 +117,19 @@ class AuctionSimulator {
     console.log(`   Gas cost for writing updates: ${chalk.red(updateGasResult.totalGas)}`);
 
     console.log(chalk.bold.green('\n--- Tree State After Clearing ---'));
-    Visualizer.drawMemoryLayout(this.tree, []);
-    Visualizer.drawAsciiTree(this.tree, []);
+    const vizData = this.model.getVisualizationData();
+    Visualizer.drawMemoryLayout(vizData.tree, []);
+    Visualizer.drawAsciiTree(vizData.tree, []);
   }
 
-  // Binary search to find the clearing price
-  private findClearingPrice(targetVolume: uint256): { clearingPrice: number; queryOps: any[] } {
+  private findFenwickClearingPrice(targetVolume: uint256): { clearingPrice: number; queryOps: any[] } {
+    const fenwickModel = this.model as FenwickAuction;
     let low = 0;
     let high = MAX_TICKS;
     let clearingPrice = 0;
     const allOps: any[] = [];
 
-    const totalVolumeResult = this.tree.query(MAX_TICKS - 1);
+    const totalVolumeResult = fenwickModel.query(MAX_TICKS - 1);
     const totalVolume = totalVolumeResult.sum;
     allOps.push(...totalVolumeResult.operations);
 
@@ -134,7 +146,7 @@ class AuctionSimulator {
             continue;
         }
 
-        const volumeBelowResult = this.tree.query(mid - 1);
+        const volumeBelowResult = fenwickModel.query(mid - 1);
         allOps.push(...volumeBelowResult.operations);
         
         const volumeFromTop = totalVolume - volumeBelowResult.sum;
@@ -152,15 +164,20 @@ class AuctionSimulator {
 
   public run = async () => {
     console.log('--- Packed Fenwick Tree Auction Simulator ---');
-    Visualizer.drawMemoryLayout(this.tree);
-    Visualizer.drawAsciiTree(this.tree);
+    const vizData = this.model.getVisualizationData();
+    if(this.model instanceof FenwickAuction) {
+        Visualizer.drawMemoryLayout(vizData.tree);
+        Visualizer.drawAsciiTree(vizData.tree);
+    } else {
+        Visualizer.drawFrontierState(vizData);
+    }
 
     while (true) {
-      const choices = [
-        { name: `Place a new random bid`, value: 'bid' },
-        { name: 'Clear auction', value: 'clear' },
-        { name: 'Exit', value: 'exit' }
-      ];
+      const choices = [{ name: `Place a new random bid`, value: 'bid' }];
+      if (this.model instanceof FenwickAuction) {
+          choices.push({ name: 'Clear Fenwick auction', value: 'clear' });
+      }
+      choices.push({ name: 'Exit', value: 'exit' });
 
       const { action } = await inquirer.prompt(
         {
@@ -174,7 +191,7 @@ class AuctionSimulator {
       if (action === 'bid') {
         this.placeNextBid();
       } else if (action === 'clear') {
-        await this.clearAuction();
+        await this.clearFenwickAuction();
       } else if (action === 'exit') {
         break;
       }
@@ -183,8 +200,27 @@ class AuctionSimulator {
 }
 
 async function main() {
-  const simulator = new AuctionSimulator();
-  await simulator.run();
+    const { modelType } = await inquirer.prompt({
+        type: 'list',
+        name: 'modelType',
+        message: 'Which auction model would you like to simulate?',
+        choices: [
+            { name: 'Packed Fenwick Tree', value: 'fenwick' },
+            { name: 'Monotone Frontier (Bitmap)', value: 'frontier' },
+        ],
+    });
+
+    let model: BaseAuction;
+    if (modelType === 'fenwick') {
+        model = new FenwickAuction(MAX_TICKS);
+        console.log(chalk.bold.green('Simulating Packed Fenwick Tree...'));
+    } else {
+        model = new FrontierAuction(MAX_TICKS);
+        console.log(chalk.bold.green('Simulating Monotone Frontier Auction...'));
+    }
+
+    const simulator = new AuctionSimulator(model);
+    await simulator.run();
 }
 
 main().catch(err => {
